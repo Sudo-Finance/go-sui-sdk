@@ -1,7 +1,7 @@
 package sui_types
 
 import (
-	"github.com/coming-chat/go-sui/v2/move_types"
+	"github.com/Sudo-Finance/go-sui-sdk/v2/move_types"
 	"github.com/fardream/go-bcs/bcs"
 	"github.com/stretchr/testify/require"
 	"testing"
