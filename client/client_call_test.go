@@ -192,7 +192,7 @@ func TestClient_GetAllCoins(t *testing.T) {
 	type args struct {
 		ctx     context.Context
 		address suiAddress
-		cursor  *suiObjectID
+		cursor  *string
 		limit   uint
 	}
 	tests := []struct {

@@ -51,7 +51,7 @@ func (c *Client) GetCoins(
 	ctx context.Context,
 	owner suiAddress,
 	coinType *string,
-	cursor *suiObjectID,
+	cursor *string,
 	limit uint,
 ) (*types.CoinPage, error) {
 	var resp types.CoinPage
@@ -63,7 +63,7 @@ func (c *Client) GetCoins(
 func (c *Client) GetAllCoins(
 	ctx context.Context,
 	owner suiAddress,
-	cursor *suiObjectID,
+	cursor *string,
 	limit uint,
 ) (*types.CoinPage, error) {
 	var resp types.CoinPage
