@@ -23,14 +23,8 @@ func TestClient_GetLatestSuiSystemState(t *testing.T) {
 
 func TestClient_GetValidatorsApy(t *testing.T) {
 	cli := ChainClient(t)
-	apys, err := cli.GetValidatorsApy(context.Background())
-	require.Nil(t, err)
-	t.Logf("current epoch %v", apys.Epoch)
-	apyMap := apys.ApyMap()
-	for idx := 0; idx < 10; idx++ {
-		key := apys.Apys[idx].Address
-		t.Logf("%v apy = %v", key, apyMap[key])
-	}
+	_, err := cli.GetValidatorsApy(context.Background())
+	require.ErrorIs(t, err, ErrValidatorsApyUnavailable)
 }
 
 func TestGetDelegatedStakes(t *testing.T) {

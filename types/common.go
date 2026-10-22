@@ -88,4 +88,7 @@ type Page[T SuiTransactionBlockResponse | SuiEvent | Coin | SuiObjectResponse | 
 	Data        []T  `json:"data"`
 	NextCursor  *C   `json:"nextCursor,omitempty"`
 	HasNextPage bool `json:"hasNextPage"`
+	// NextPageToken resumes the next page on gRPC or GraphQL.
+	// A JSON-RPC nextCursor cannot be reused here.
+	NextPageToken string `json:"nextPageToken,omitempty"`
 }

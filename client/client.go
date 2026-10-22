@@ -1,199 +1,254 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
-	"reflect"
-	"strconv"
+	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
+
+	"github.com/Sudo-Finance/go-sui-sdk/v2/suirpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
-var (
-	ErrNoResult = errors.New("no result in JSON-RPC response")
-)
+const maxMessageBytes = 64 << 20
 
-// BatchElem is an element in a batch request.
+// BatchElem is retained so existing JSON-RPC batch call sites still compile.
+// BatchCall returns ErrJSONRPCRemoved.
 type BatchElem struct {
 	Method string
 	Args   []interface{}
-	// The result is unmarshaled into this field. Result must be set to a
-	// non-nil pointer value of the desired type, otherwise the response will be
-	// discarded.
 	Result interface{}
-	// Error is set if the server returns an error for this request, or if
-	// unmarshaling into Result fails. It is not set for I/O errors.
-	Error error
+	Error  error
 }
 
+// Client talks to a Sui full node over gRPC, and to GraphQL for event queries.
 type Client struct {
-	idCounter uint32
-
-	rpcUrl string
-	client *http.Client
+	conn    *grpc.ClientConn
+	ledger  suirpc.LedgerServiceClient
+	state   suirpc.StateServiceClient
+	exec    suirpc.TransactionExecutionServiceClient
+	names   suirpc.NameServiceClient
+	graphql string
+	http    *http.Client
+	token   string
 }
 
-func Dial(rpcUrl string) (client *Client, err error) {
-	hc := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:    3,
-			IdleConnTimeout: 30 * time.Second,
-		},
-		Timeout: 30 * time.Second,
+type dialConfig struct {
+	graphql  string
+	token    string
+	http     *http.Client
+	insecure bool
+}
+
+// DialOption configures Dial.
+type DialOption func(*dialConfig)
+
+// WithGraphQLEndpoint sets the GraphQL URL used by QueryEvents.
+// When omitted, Dial derives it from a public fullnode URL
+// (https://fullnode.<network>.sui.io -> https://graphql.<network>.sui.io/graphql)
+// or appends /graphql to any other https endpoint.
+func WithGraphQLEndpoint(endpoint string) DialOption {
+	return func(cfg *dialConfig) {
+		cfg.graphql = strings.TrimRight(endpoint, "/")
 	}
-	return DialWithClient(rpcUrl, hc)
 }
 
-func DialWithClient(rpcUrl string, c *http.Client) (client *Client, err error) {
-	client = &Client{
-		rpcUrl: strings.TrimRight(rpcUrl, "/"),
-		client: c,
+// WithToken sends the Chainstack (and compatible) x-token credential on
+// gRPC metadata and GraphQL requests.
+func WithToken(token string) DialOption {
+	return func(cfg *dialConfig) {
+		cfg.token = token
 	}
-	return
 }
 
-// Call performs a JSON-RPC call with the given arguments and unmarshals into
-// the result if no error occurred.
+// WithHTTPClient sets the HTTP client used for GraphQL.
+func WithHTTPClient(c *http.Client) DialOption {
+	return func(cfg *dialConfig) {
+		cfg.http = c
+	}
+}
+
+// WithInsecure dials gRPC without TLS. Use this for a local node.
+func WithInsecure() DialOption {
+	return func(cfg *dialConfig) {
+		cfg.insecure = true
+	}
+}
+
+// Dial connects to a Sui gRPC endpoint.
 //
-// The result must be a pointer so that package json can unmarshal into it. You
-// can also pass nil, in which case the result is ignored.
+// target accepts the historical JSON-RPC URLs (https://fullnode.mainnet.sui.io),
+// a gRPC host:port (fullnode.mainnet.sui.io:443), or a provider https URL.
+func Dial(target string, opts ...DialOption) (*Client, error) {
+	cfg := dialConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	resolved, err := resolveEndpoint(target)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.graphql != "" {
+		resolved.graphql = cfg.graphql
+	}
+	insecureDial := cfg.insecure || resolved.insecure
+
+	var dialOpts []grpc.DialOption
+	if insecureDial {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})))
+	}
+	dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(
+		grpc.MaxCallRecvMsgSize(maxMessageBytes),
+		grpc.MaxCallSendMsgSize(maxMessageBytes),
+	))
+	if cfg.token != "" {
+		dialOpts = append(dialOpts,
+			grpc.WithUnaryInterceptor(tokenUnaryInterceptor(cfg.token)),
+			grpc.WithStreamInterceptor(tokenStreamInterceptor(cfg.token)),
+		)
+	}
+
+	conn, err := grpc.NewClient(resolved.grpcTarget, dialOpts...)
+	if err != nil {
+		return nil, err
+	}
+	hc := cfg.http
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &Client{
+		conn:    conn,
+		ledger:  suirpc.NewLedgerServiceClient(conn),
+		state:   suirpc.NewStateServiceClient(conn),
+		exec:    suirpc.NewTransactionExecutionServiceClient(conn),
+		names:   suirpc.NewNameServiceClient(conn),
+		graphql: resolved.graphql,
+		http:    hc,
+		token:   cfg.token,
+	}, nil
+}
+
+// DialWithClient matches the old helper. The HTTP client is used for GraphQL.
+func DialWithClient(target string, c *http.Client) (*Client, error) {
+	return Dial(target, WithHTTPClient(c))
+}
+
+// Close releases the gRPC connection.
+func (c *Client) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
+
+// Call is the old JSON-RPC escape hatch. Sui full nodes no longer serve it.
 func (c *Client) Call(result interface{}, method Method, args ...interface{}) error {
-	ctx := context.Background()
-	return c.CallContext(ctx, result, method, args...)
+	return c.CallContext(context.Background(), result, method, args...)
 }
 
-// CallContext performs a JSON-RPC call with the given arguments. If the context is
-// canceled before the call has successfully returned, CallContext returns immediately.
-//
-// The result must be a pointer so that package json can unmarshal into it. You
-// can also pass nil, in which case the result is ignored.
+// CallContext reports that the named JSON-RPC method is no longer served.
 func (c *Client) CallContext(ctx context.Context, result interface{}, method Method, args ...interface{}) error {
-	if result != nil && reflect.TypeOf(result).Kind() != reflect.Ptr {
-		return fmt.Errorf("call result parameter must be pointer or nil interface: %v", result)
-	}
-	msg, err := c.newMessage(method.String(), args...)
-	if err != nil {
-		return err
-	}
-	respBody, err := c.doRequest(ctx, msg)
-	if err != nil {
-		return err
-	}
-	defer respBody.Close()
-
-	var respmsg jsonrpcMessage
-	if err := json.NewDecoder(respBody).Decode(&respmsg); err != nil {
-		return err
-	}
-	if respmsg.Error != nil {
-		return respmsg.Error
-	}
-	if len(respmsg.Result) == 0 {
-		return ErrNoResult
-	}
-	return json.Unmarshal(respmsg.Result, result)
+	return fmt.Errorf("%w: %s", ErrJSONRPCRemoved, method.String())
 }
 
-// BatchCall sends all given requests as a single batch and waits for the server
-// to return a response for all of them.
+// BatchCall reports that JSON-RPC batch calls are no longer served.
 func (c *Client) BatchCall(b []BatchElem) error {
 	return c.BatchCallContext(context.Background(), b)
 }
 
-// BatchCallContext sends all given requests as a single batch and waits for the server
-// to return a response for all of them. The wait duration is bounded by the
-// context's deadline.
+// BatchCallContext reports that JSON-RPC batch calls are no longer served.
 func (c *Client) BatchCallContext(ctx context.Context, b []BatchElem) error {
-	var (
-		msgs = make([]*jsonrpcMessage, len(b))
-		byID = make(map[string]int, len(b))
-	)
-	for i, elem := range b {
-		msg, err := c.newMessage(elem.Method, elem.Args...)
-		if err != nil {
-			return err
-		}
-		msgs[i] = msg
-		byID[string(msg.ID)] = i
-	}
-	respBody, err := c.doRequest(ctx, msgs)
-	if err != nil {
-		return err
-	}
-	defer respBody.Close()
-
-	var respmsgs []jsonrpcMessage
-	if err := json.NewDecoder(respBody).Decode(&respmsgs); err != nil {
-		return err
-	}
-	for idx, resp := range respmsgs {
-		elem := &b[idx]
-		if resp.Error != nil {
-			elem.Error = resp.Error
-			continue
-		}
-		if len(resp.Result) == 0 {
-			elem.Error = ErrNoResult
-			continue
-		}
-		elem.Error = json.Unmarshal(resp.Result, elem.Result)
-	}
-	return nil
+	return fmt.Errorf("%w: batch JSON-RPC", ErrJSONRPCRemoved)
 }
 
-func (c *Client) nextID() json.RawMessage {
-	id := atomic.AddUint32(&c.idCounter, 1)
-	return strconv.AppendUint(nil, uint64(id), 10)
+type resolvedEndpoint struct {
+	grpcTarget string
+	graphql    string
+	insecure   bool
 }
 
-func (c *Client) newMessage(method string, paramsIn ...interface{}) (*jsonrpcMessage, error) {
-	msg := &jsonrpcMessage{Version: vsn, ID: c.nextID(), Method: method}
-	if paramsIn != nil { // prevent sending "params":null
-		var err error
-		if msg.Params, err = json.Marshal(paramsIn); err != nil {
-			return nil, err
-		}
+func resolveEndpoint(target string) (resolvedEndpoint, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return resolvedEndpoint{}, errors.New("empty Sui endpoint")
 	}
-	return msg, nil
+	if strings.Contains(target, "://") {
+		return resolveURL(target)
+	}
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return resolvedEndpoint{}, fmt.Errorf("gRPC target %q must be host:port or an https URL", target)
+	}
+	return resolvedEndpoint{
+		grpcTarget: target,
+		graphql:    graphqlForHost(host),
+		insecure:   port != "443" && isLocalHost(host),
+	}, nil
 }
 
-func (c *Client) doRequest(ctx context.Context, msg interface{}) (io.ReadCloser, error) {
-	body, err := json.Marshal(msg)
+func resolveURL(raw string) (resolvedEndpoint, error) {
+	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return resolvedEndpoint{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.rpcUrl, io.NopCloser(bytes.NewReader(body)))
-	if err != nil {
-		return nil, err
+	if u.Hostname() == "" {
+		return resolvedEndpoint{}, fmt.Errorf("endpoint %q has no host", raw)
 	}
-	req.ContentLength = int64(len(body))
-	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// do request
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var buf bytes.Buffer
-		var body []byte
-		if _, err := buf.ReadFrom(resp.Body); err == nil {
-			body = buf.Bytes()
-		}
-
-		return nil, HTTPError{
-			Status:     resp.Status,
-			StatusCode: resp.StatusCode,
-			Body:       body,
+	port := u.Port()
+	insecure := u.Scheme == "http"
+	if port == "" {
+		if insecure {
+			port = "80"
+		} else {
+			port = "443"
 		}
 	}
-	return resp.Body, nil
+	graphql := ""
+	if strings.HasSuffix(strings.TrimRight(u.Path, "/"), "/graphql") {
+		graphql = strings.TrimRight(raw, "/")
+	} else if derived := graphqlForHost(u.Hostname()); derived != "" {
+		graphql = derived
+	} else if !insecure {
+		origin := u.Scheme + "://" + u.Host
+		graphql = strings.TrimRight(origin, "/") + "/graphql"
+	}
+	return resolvedEndpoint{
+		grpcTarget: net.JoinHostPort(u.Hostname(), port),
+		graphql:    graphql,
+		insecure:   insecure,
+	}, nil
+}
+
+func graphqlForHost(host string) string {
+	const prefix = "fullnode."
+	if strings.HasPrefix(host, prefix) {
+		return "https://graphql." + strings.TrimPrefix(host, prefix) + "/graphql"
+	}
+	return ""
+}
+
+func isLocalHost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func tokenUnaryInterceptor(token string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(metadata.AppendToOutgoingContext(ctx, "x-token", token), method, req, reply, cc, opts...)
+	}
+}
+
+func tokenStreamInterceptor(token string) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return streamer(metadata.AppendToOutgoingContext(ctx, "x-token", token), desc, cc, method, opts...)
+	}
 }

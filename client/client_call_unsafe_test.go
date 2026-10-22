@@ -26,9 +26,8 @@ func TestClient_TransferObject(t *testing.T) {
 		context.Background(), *signer, *recipient,
 		coin.CoinObjectId, nil, types.NewSafeSuiBigInt(SUI(0.01).Uint64()),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_TransferSui(t *testing.T) {
@@ -49,9 +48,8 @@ func TestClient_TransferSui(t *testing.T) {
 		types.NewSafeSuiBigInt(amount),
 		types.NewSafeSuiBigInt(gasBudget),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_PayAllSui(t *testing.T) {
@@ -71,9 +69,8 @@ func TestClient_PayAllSui(t *testing.T) {
 		pickedCoins.CoinIds(),
 		types.NewSafeSuiBigInt(gasBudget),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_Pay(t *testing.T) {
@@ -99,9 +96,8 @@ func TestClient_Pay(t *testing.T) {
 		nil,
 		types.NewSafeSuiBigInt(gasBudget),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_PaySui(t *testing.T) {
@@ -125,9 +121,8 @@ func TestClient_PaySui(t *testing.T) {
 		},
 		types.NewSafeSuiBigInt(gasBudget),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_SplitCoin(t *testing.T) {
@@ -148,9 +143,8 @@ func TestClient_SplitCoin(t *testing.T) {
 		splitCoins,
 		nil, types.NewSafeSuiBigInt(gasBudget),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, false)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_SplitCoinEqual(t *testing.T) {
@@ -170,9 +164,8 @@ func TestClient_SplitCoinEqual(t *testing.T) {
 		types.NewSafeSuiBigInt(uint64(2)),
 		nil, types.NewSafeSuiBigInt(gasBudget),
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_MergeCoins(t *testing.T) {
@@ -191,9 +184,8 @@ func TestClient_MergeCoins(t *testing.T) {
 		coin1.CoinObjectId, coin2.CoinObjectId,
 		&coin3.CoinObjectId, coin3.Balance,
 	)
-	require.Nil(t, err)
-
-	simulateCheck(t, cli, txn.TxBytes, true)
+	require.ErrorIs(t, err, ErrJSONRPCRemoved)
+	require.Nil(t, txn)
 }
 
 func TestClient_Publish(t *testing.T) {
@@ -231,7 +223,7 @@ func simulateCheck(
 	showJson bool,
 ) *types.DryRunTransactionBlockResponse {
 	simulate, err := cli.DryRunTransaction(context.Background(), txBytes)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Equal(t, simulate.Effects.Data.V1.Status.Error, "")
 	require.True(t, simulate.Effects.Data.IsSuccess())
 	if showJson {
