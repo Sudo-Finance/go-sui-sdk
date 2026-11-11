@@ -123,6 +123,9 @@ func graphQLEventFilter(query types.EventFilter) (map[string]any, error) {
 		return nil, fmt.Errorf("GraphQL event filters cannot match a transaction digest; use GetEvents")
 	}
 	filter := map[string]any{}
+	if query.AfterCheckpoint != nil {
+		filter["afterCheckpoint"] = *query.AfterCheckpoint
+	}
 	if query.Sender != nil {
 		filter["sender"] = query.Sender.String()
 	}

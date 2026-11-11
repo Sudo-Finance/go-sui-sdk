@@ -25,6 +25,8 @@ type SuiEvent struct {
 }
 
 type EventFilter struct {
+	// AfterCheckpoint excludes events at or before this checkpoint in GraphQL queries.
+	AfterCheckpoint *CheckpointSequenceNumber `json:"afterCheckpoint,omitempty"`
 	/// Query by sender sui_types.address.
 	Sender *sui_types.SuiAddress `json:"Sender,omitempty"`
 	/// Return events emitted by the given transaction.
